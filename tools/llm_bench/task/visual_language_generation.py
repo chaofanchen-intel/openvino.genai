@@ -25,6 +25,31 @@ FW_UTILS = {
 }
 
 
+def permute_vlm_prompt(prompt, num, args):
+    """Mutate the VLM prompt per iteration to defeat the GenAI/PA prefix cache.
+
+    The VLM pipelines take a string prompt (not TokenizedInputs like the text
+    path), so we cannot replace a token id. Instead we prepend the iteration
+    index, which changes the very first token and therefore mismatches the KV
+    prefix cache from position 0. This mirrors the text_generation.py behavior
+    (enabled by default; disable with --disable_prompt_permutation) so that
+    every iteration measures a real cold prefill / first-token latency instead
+    of a cache-warm optimistic value.
+
+    Returns (effective_prompt, enable_prompt_permutations).
+    """
+    enable_prompt_permutations = not args.get("disable_prompt_permutation", False)
+    if not enable_prompt_permutations:
+        return prompt, False
+    log.warning(
+        "Enabled input prompt permutations. It means that generated results may vary on different steps "
+        "and the prompt grows by one leading token. This defeats the prefix cache so first-token latency "
+        "reflects a cold prefill. If it is not expected, please specify --disable_prompt_permutation in "
+        "your benchmarking command to disable this behavior"
+    )
+    return f"{num} {prompt}", True
+
+
 def run_visual_language_generation_optimum(
         inputs, num, model, processor, args, iter_data_list, md5_list, prompt_index,
         bench_hook, model_precision, proc_id, mem_consumption):
@@ -45,9 +70,10 @@ def run_visual_language_generation_optimum(
     prefix = '[warm-up]' if num == 0 else '[{}]'.format(num)
     log.info(f'{prefix}[P{prompt_index}] Input image nums: {len(images)}')
     log.info(f'{prefix}[P{prompt_index}] Input video nums: {len(videos)}')
+    input_prompt, enable_prompt_permutations = permute_vlm_prompt(prompts[0], num, args)
     input_data = model.preprocess_inputs(image=images[0] if images else None,
                                          video=videos[0] if videos else None,
-                                         text=prompts[0], **processor)
+                                         text=input_prompt, **processor)
 
     tok_encode_end = time.perf_counter()
     tok_encode_time = (tok_encode_end - tok_encode_start) * 1000
@@ -156,7 +182,7 @@ def run_visual_language_generation_optimum(
         batch_size=args['batch_size'],
         prompt_idx=prompt_index
     )
-    if num > 0:
+    if num > 0 and not enable_prompt_permutations:
         prev_md5 = md5_list[num - 1][prompt_index]
         if result_md5_list != prev_md5:
             log.warning(f"[{num}] Prompt[{prompt_index}]'s md5 {result_md5_list} "
@@ -210,9 +236,11 @@ def run_visual_language_generation_genai(
     if videos:
         kwargs["videos"] = videos
 
+    input_prompt, enable_prompt_permutations = permute_vlm_prompt(prompts[0], num, args)
+
     log.info("%s[P%s] Text generation start: %s", prefix, prompt_index, datetime.datetime.now().isoformat())
     start = time.perf_counter()
-    generation_result = model.generate(prompts[0], generation_config=gen_config, **kwargs)
+    generation_result = model.generate(input_prompt, generation_config=gen_config, **kwargs)
     end = time.perf_counter()
     log.info("%s[P%s] Text generation end: %s", prefix, prompt_index, datetime.datetime.now().isoformat())
     generation_time = end - start
@@ -275,7 +303,7 @@ def run_visual_language_generation_genai(
         batch_size=args['batch_size'],
         prompt_idx=prompt_index
     )
-    if num > 0:
+    if num > 0 and not enable_prompt_permutations:
         prev_md5 = md5_list[num - 1][prompt_index]
         if result_md5_list != prev_md5:
             log.warning(f"[{num}] Prompt[{prompt_index}]'s md5 {result_md5_list} "
