@@ -1412,6 +1412,12 @@ def create_genai_text_reranker_model(
     else:
         config.max_length = kwargs.get("rerank_max_length")
 
+    # NPU compiles static-shape IR only. A statically-reshaped reranker model expects every
+    # inference to feed exactly [num_candidates, max_length], so force padding to max_length on NPU.
+    # CPU/GPU keep the default dynamic-shape behavior (no forced padding).
+    if device.upper() == "NPU":
+        config.pad_to_max_length = True
+
     ov_config = kwargs['config']
 
     if kwargs.get("mem_consumption"):

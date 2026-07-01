@@ -4,7 +4,9 @@ This script provides a unified approach to estimate performance for Large Langua
 
 This tool is designed for performance estimation, not accuracy validation. For accuracy checks, refer to the [wwb tool](https://github.com/openvinotoolkit/openvino.genai/blob/master/tools/who_what_benchmark/README.md).
 
-For Text Generation Pipeline prompt modifications are turned on by default from iteration to iteration. It's enabled to avoid prefix caching. If you need to have equal results on each iteration, please, run tool with --disable_prompt_permutation.
+For Text Generation (`text_gen`) and Visual Language (`visual_text_gen`) pipelines, prompt modifications are turned on by default from iteration to iteration. It's enabled to avoid prefix caching, so that first-token latency reflects a real cold prefill on every measured iteration instead of a cache-warm value. If you need to have equal results on each iteration (e.g. a cache-warm scenario), please, run tool with --disable_prompt_permutation.
+
+> Note: `text_gen` permutes by mutating an early input token id of the pre-tokenized prompt. `visual_text_gen` takes a string prompt (no `TokenizedInputs`), so it permutes by prepending the iteration index to the prompt — this changes the first token and misses the KV prefix cache from position 0. The prompt therefore grows by one leading token between iterations.
 
 ### 1. Prepare Python Virtual Environment for LLM Benchmarking
 
@@ -181,7 +183,7 @@ python benchmark.py -m ./models/llama-2-7b-chat/ -p "What is openvino?" -n 2 --t
 ```
 **Some additional parameters:**
 - `--cb_config`: Path to file with Continuous Batching Scheduler settings or dict".
-- `--disable_prompt_permutation`: "Disable modification prompt from run to run for avoid prefix caching"
+- `--disable_prompt_permutation`: "Disable modification prompt from run to run for avoid prefix caching". Applies to both `text_gen` and `visual_text_gen`.
 - `--apply_chat_template`: "Apply chat template for LLM. By default chat template is not applied"
 - `--from_onnx`: "Load the model from an ONNX file instead of a pre-converted OpenVINO IR."
 
@@ -215,7 +217,11 @@ python benchmark.py -m models/llama-2-7b-chat/ -p "What is openvino?" -n 2 --tas
 optimum-cli export openvino --model openbmb/MiniCPM-V-2_6 --trust-remote-code models/MiniCPM-V-2_6
 # run benchmark.py
 python benchmark.py -m models/MiniCPM-V-2_6/ -p "What is openvino?" -n 2 --task visual_text_gen -i ./image.png
+# cache-warm scenario (identical prompt every iteration, prefix cache reused):
+python benchmark.py -m models/MiniCPM-V-2_6/ -p "What is openvino?" -n 2 --task visual_text_gen -i ./image.png --disable_prompt_permutation
 ```
+
+> **Prompt permutation:** like `text_gen`, `visual_text_gen` permutes the prompt per iteration by default (prepending the iteration index) so first-token latency is a real cold prefill. Pass `--disable_prompt_permutation` for a cache-warm run with stable, identical-prompt iterations.
 
 > **Supported VLM model types:** llava, llava-next, qwen2-vl, llava-qwen2, internvl-chat, minicpmv, phi3-v, minicpm-v, minicpmo, maira2, qwen2-5-vl
 

@@ -51,6 +51,8 @@ def output_comments(result, use_case, writer):
         comment_list.append('prompt_idx: Image Index')
     comment_list.append('tokenization_time: Tokenizer encode time')
     comment_list.append('detokenization_time: Tokenizer decode time')
+    comment_list.append('2nd_tokens_throughput: batch_size * 1000 / 2nd_avg_latency(ms)')
+    comment_list.append('total_throughput: output_size / generation_time(s)')
     comment_list.append('pretrain_time: Total time of load model and compile model')
     comment_list.append('generation_time: Time for one interaction. (e.g. The duration of  answering one question or generating one picture)')
     comment_list.append('iteration=0: warm-up; iteration=avg: average (exclude warm-up);iteration=mini: minimum value (exclude warm-up);'
@@ -70,6 +72,11 @@ def output_comments(result, use_case, writer):
     comment_list.append(
         'compile_max_increase_rss_mem/compile_max_increase_sys_mem: max increase of rss/system memory on compilation phase;'
     )
+    comment_list.append(
+        'resource_* fields: compact whole-run CPU/GPU/NPU utilization and RSS/System memory summary; GPU util is blank if xpu-smi does not expose compute utilization.'
+    )
+    comment_list.append('resource_cpu_cpuN_avg_util: average per-core CPU utilization over the benchmark run')
+    comment_list.append('resource_gpu_memory_avg_util: average GPU memory utilization reported by xpu-smi')
 
     for comments in comment_list:
         result['iteration'] = comments
@@ -133,6 +140,10 @@ def gen_data_to_csv(
     result["generation_time(s)"] = round(generation_time, 5) if generation_time != "" else generation_time
     result["output_size"] = iter_data["output_size"]
     result["latency(ms)"] = round(latency, 5) if latency != "" else latency
+    second_token_throughput = output_json.estimate_throughput(other_latency, result.get('batch_size', 1))
+    total_throughput = output_json.estimate_total_throughput(iter_data["output_size"], generation_time)
+    result['2nd_tokens_throughput(tokens/s)'] = round(second_token_throughput, 5) if second_token_throughput else ''
+    result['total_throughput(tokens/s)'] = round(total_throughput, 5) if total_throughput else ''
     result["result_md5"] = iter_data["result_md5"]
     if first_latency < 0:
         result['1st_latency(ms)'] = 'NA'
@@ -179,7 +190,8 @@ def write_result(
     mem_unit = MemThreadHandler.DEF_MEM_UNIT
     if memory_data_collector.mth:
         mem_unit = memory_data_collector.mth.memory_unit
-    first_latenct_unit = "ms/token" if model_args["use_case"].task in ["text_gen_chat"] else "ms"
+    first_latency_unit = "ms/token" if model_args["use_case"].task in ["text_gen_chat"] else "ms"
+    cpu_core_headers = output_json.get_resource_cpu_core_csv_headers(model_args)
     header = [
         "iteration",
         "model",
@@ -197,7 +209,9 @@ def write_result(
         "generation_time(s)",
         "output_size",
         "latency(ms)",
-        f"1st_latency({first_latenct_unit})",
+        "2nd_tokens_throughput(tokens/s)",
+        "total_throughput(tokens/s)",
+        f"1st_latency({first_latency_unit})",
         "2nd_avg_latency(ms)",
         "precision",
         f"max_rss_mem({mem_unit.value})",
@@ -206,12 +220,22 @@ def write_result(
         f"max_increase_sys_mem({mem_unit.value})",
         "prompt_idx",
         "chat_idx",
-        f"1st_infer_latency({first_latenct_unit})",
+        f"1st_infer_latency({first_latency_unit})",
         "2nd_infer_avg_latency(ms)",
         "num_beams",
         "batch_size",
         "tokenization_time",
         "detokenization_time",
+        "resource_cpu_avg_util(%)",
+        *cpu_core_headers,
+        "resource_gpu_avg_util(%)",
+        "resource_gpu_memory_avg_util(%)",
+        "resource_npu_avg_util(%)",
+        "resource_avg_rss_mem(MiB)",
+        "resource_peak_rss_mem(MiB)",
+        "resource_avg_sys_mem(MiB)",
+        "resource_peak_sys_mem(MiB)",
+        "resource_memory_samples",
         "result_md5",
         "start",
         "end",
@@ -220,7 +244,7 @@ def write_result(
 
     if len(iter_data_list) > 0:
         with open(out_file, 'w+', newline='') as f:
-            writer = csv.DictWriter(f, header)
+            writer = csv.DictWriter(f, header, extrasaction='ignore')
             writer.writeheader()
             result = {}
             result['model'] = model
@@ -230,6 +254,7 @@ def write_result(
             result['precision'] = model_precision
             result['num_beams'] = model_args['num_beams']
             result['batch_size'] = model_args['batch_size']
+            output_json.add_resource_usage_to_row(result, model_args)
             for i in range(len(iter_data_list)):
                 iter_data = iter_data_list[i]
                 pre_time = '' if i > 0 else result['pretrain_time(s)']
@@ -244,3 +269,131 @@ def write_result(
                     gen_data_to_csv(result, data, '', iter_timestamp, None, mem_unit)
                     writer.writerow(result)
             output_comments(result, model_args["use_case"].task, writer)
+
+
+def _benchmark_csv_header(model_args):
+    cpu_core_headers = output_json.get_resource_cpu_core_csv_headers(model_args)
+    return [
+        'model',
+        'framework',
+        'device',
+        'precision',
+        'num_beams',
+        'batch_size',
+        'prompt_idx',
+        'measured_iterations',
+        'pretrain_time(s)',
+        'input_size',
+        'infer_count',
+        'generation_time_avg(s)',
+        'output_size_avg',
+        'latency_avg(ms)',
+        '2nd_tokens_throughput(tokens/s)',
+        'total_throughput(tokens/s)',
+        '1st_latency_avg(ms)',
+        '2nd_avg_latency_avg(ms)',
+        '1st_infer_latency_avg(ms)',
+        '2nd_infer_avg_latency_avg(ms)',
+        'tokenization_time_avg',
+        'detokenization_time_avg',
+        'resource_cpu_avg_util(%)',
+        *cpu_core_headers,
+        'resource_gpu_avg_util(%)',
+        'resource_gpu_memory_avg_util(%)',
+        'resource_npu_avg_util(%)',
+        'resource_avg_rss_mem(MiB)',
+        'resource_peak_rss_mem(MiB)',
+        'resource_avg_sys_mem(MiB)',
+        'resource_peak_sys_mem(MiB)',
+        'resource_memory_samples',
+        'initial_sys_mem(MiB)',
+        'initial_rss_mem(MiB)',
+        'compile_max_rss_mem(MiB)',
+        'compile_max_sys_mem(MiB)',
+        'compile_max_increase_rss_mem(MiB)',
+        'compile_max_increase_sys_mem(MiB)',
+        'result_md5',
+    ]
+
+
+def _benchmark_entry_to_row(entry):
+    row = {
+        'model': entry.get('model', ''),
+        'framework': entry.get('framework', ''),
+        'device': entry.get('device', ''),
+        'precision': entry.get('precision', ''),
+        'num_beams': entry.get('num_beams', ''),
+        'batch_size': entry.get('batch_size', ''),
+        'prompt_idx': entry.get('prompt_idx', ''),
+        'measured_iterations': entry.get('measured_iterations', ''),
+        'pretrain_time(s)': entry.get('pretrain_time', ''),
+        'input_size': entry.get('input_size', ''),
+        'infer_count': entry.get('infer_count', ''),
+        'generation_time_avg(s)': entry.get('generation_time', ''),
+        'output_size_avg': entry.get('output_size', ''),
+        'latency_avg(ms)': entry.get('latency', ''),
+        '2nd_tokens_throughput(tokens/s)': entry.get('second_token_throughput', ''),
+        'total_throughput(tokens/s)': entry.get('total_throughput', ''),
+        '1st_latency_avg(ms)': entry.get('first_latency', ''),
+        '2nd_avg_latency_avg(ms)': entry.get('second_avg_latency', ''),
+        '1st_infer_latency_avg(ms)': entry.get('first_infer_latency', ''),
+        '2nd_infer_avg_latency_avg(ms)': entry.get('second_infer_avg_latency', ''),
+        'tokenization_time_avg': entry.get('tokenization_time', ''),
+        'detokenization_time_avg': entry.get('detokenization_time', ''),
+        'resource_cpu_avg_util(%)': entry.get('resource_cpu_avg_util_percent', ''),
+        'resource_gpu_avg_util(%)': entry.get('resource_gpu_avg_util_percent', ''),
+        'resource_gpu_memory_avg_util(%)': entry.get('resource_gpu_memory_avg_util_percent', ''),
+        'resource_npu_avg_util(%)': entry.get('resource_npu_avg_util_percent', ''),
+        'resource_avg_rss_mem(MiB)': entry.get('resource_avg_rss_mem_mib', ''),
+        'resource_peak_rss_mem(MiB)': entry.get('resource_peak_rss_mem_mib', ''),
+        'resource_avg_sys_mem(MiB)': entry.get('resource_avg_sys_mem_mib', ''),
+        'resource_peak_sys_mem(MiB)': entry.get('resource_peak_sys_mem_mib', ''),
+        'resource_memory_samples': entry.get('resource_memory_samples', ''),
+        'initial_sys_mem(MiB)': entry.get('initial_sys_mem(MiB)', ''),
+        'initial_rss_mem(MiB)': entry.get('initial_rss_mem(MiB)', ''),
+        'compile_max_rss_mem(MiB)': entry.get('compile_max_rss_mem(MiB)', ''),
+        'compile_max_sys_mem(MiB)': entry.get('compile_max_sys_mem(MiB)', ''),
+        'compile_max_increase_rss_mem(MiB)': entry.get('compile_max_increase_rss_mem(MiB)', ''),
+        'compile_max_increase_sys_mem(MiB)': entry.get('compile_max_increase_sys_mem(MiB)', ''),
+        'result_md5': entry.get('result_md5', ''),
+    }
+    for core, value in (entry.get('resource_cpu_per_core_avg_util_percent', {}) or {}).items():
+        row[f'resource_cpu_{core}_avg_util(%)'] = value
+    return row
+
+
+def write_benchmark_summary(
+    report_file,
+    model,
+    framework,
+    device,
+    model_args,
+    iter_data_list,
+    pretrain_time,
+    model_precision,
+    memory_data_collector,
+):
+    entries = output_json.build_benchmark_summary_entries(
+        model, framework, device, model_args, iter_data_list, pretrain_time, model_precision, memory_data_collector
+    )
+    if not entries:
+        return
+    header = _benchmark_csv_header(model_args)
+    out_file = Path(report_file)
+    out_file.parent.mkdir(parents=True, exist_ok=True)
+    file_exists = out_file.exists() and out_file.stat().st_size > 0
+    write_header = not file_exists
+    if file_exists:
+        try:
+            with open(out_file, 'r', newline='') as f:
+                existing_header = next(csv.reader(f), [])
+            write_header = existing_header != header
+        except (OSError, StopIteration):
+            write_header = True
+    mode = 'a' if file_exists else 'w'
+    with open(out_file, mode, newline='') as f:
+        writer = csv.DictWriter(f, header, extrasaction='ignore')
+        if write_header:
+            writer.writeheader()
+        for entry in entries:
+            writer.writerow(_benchmark_entry_to_row(entry))
