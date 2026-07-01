@@ -21,6 +21,7 @@ import task.text_to_speech_generation as bench_text_to_speech
 import task.text_reranker as bench_text_rerank
 from llm_bench_utils.model_utils import analyze_args, get_ir_conversion_frontend, get_model_precision
 from llm_bench_utils.memory_monitor import MemoryMonitorHandler
+from llm_bench_utils.resource_monitor import ResourceMonitor
 
 
 DEFAULT_TORCH_THREAD_NUMS = 16
@@ -74,6 +75,16 @@ def get_argparser():
     parser.add_argument("-d", "--device", default="cpu", help="inference device")
     parser.add_argument("-r", "--report", help="report csv")
     parser.add_argument("-rj", "--report_json", help="report json")
+    parser.add_argument(
+        "--benchmark_csv",
+        default=None,
+        help="Append benchmark average-only CSV rows. Unlike -r, this excludes per-iteration rows and comments.",
+    )
+    parser.add_argument(
+        "--benchmark_json",
+        default=None,
+        help="Append benchmark average-only JSON entries. Unlike -rj, this excludes per-iteration data.",
+    )
     parser.add_argument(
         "-f", "--framework", default="ov", choices={"ov", "pt"}, help="inference framework, ov: OpenVINO, pt: PyTorch"
     )
@@ -173,6 +184,24 @@ def get_argparser():
         required=False,
         type=str,
         help="Path to store memory consumption logs and chart.",
+    )
+    parser.add_argument(
+        "--resource_monitor",
+        default=1,
+        type=int,
+        choices=[0, 1],
+        help="Enable compact CPU/GPU/NPU utilization and RSS/System memory summary in CSV/JSON reports.",
+    )
+    parser.add_argument(
+        "--resource_monitor_interval",
+        default=1000,
+        type=int,
+        help="Resource monitor sampling interval in milliseconds.",
+    )
+    parser.add_argument(
+        "--resource_gpu_command",
+        default=None,
+        help="Custom command for GPU utilization sampling. Default auto-discovers xpu-smi GPU id and uses sudo -n.",
     )
     parser.add_argument("-bs", "--batch_size", type=int, default=1, required=False, help="Batch size value")
     parser.add_argument(
@@ -506,6 +535,12 @@ def main():
     )
     args = get_argparser()
     memory_data_collector = MemoryMonitorHandler(args)
+    resource_monitor = ResourceMonitor(
+        enabled=bool(args.resource_monitor),
+        interval_ms=args.resource_monitor_interval,
+        gpu_command=args.resource_gpu_command,
+    )
+    resource_monitor.start()
 
     if args.num_assistant_tokens is not None:
         log.warning(
@@ -585,8 +620,15 @@ def main():
                 model_path, framework, args.device, model_args, args.num_iters, memory_data_collector
             )
         memory_data_collector.update_marker("stop")
+        resource_monitor.stop()
+        model_args["resource_usage"] = resource_monitor.summary()
 
-        if args.report is not None or args.report_json is not None:
+        if (
+            args.report is not None
+            or args.report_json is not None
+            or args.benchmark_csv is not None
+            or args.benchmark_json is not None
+        ):
             model_precision = ""
             if framework == "ov":
                 ir_conversion_frontend = get_ir_conversion_frontend(model_args["model_name"], model_path.parts)
@@ -619,11 +661,36 @@ def main():
                     iter_timestamp,
                     memory_data_collector,
                 )
+            if args.benchmark_csv is not None:
+                llm_bench_utils.output_csv.write_benchmark_summary(
+                    args.benchmark_csv,
+                    model_args["model_name"],
+                    framework,
+                    args.device,
+                    model_args,
+                    iter_data_list,
+                    pretrain_time,
+                    model_precision,
+                    memory_data_collector,
+                )
+            if args.benchmark_json is not None:
+                llm_bench_utils.output_json.append_benchmark_summary(
+                    args.benchmark_json,
+                    model_args["model_name"],
+                    framework,
+                    args.device,
+                    model_args,
+                    iter_data_list,
+                    pretrain_time,
+                    model_precision,
+                    memory_data_collector,
+                )
     except Exception:
         log.error("An exception occurred")
         log.info(traceback.format_exc())
         exit(1)
     finally:
+        resource_monitor.stop()
         memory_data_collector.stop()
 
 

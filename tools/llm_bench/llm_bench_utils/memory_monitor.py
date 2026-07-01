@@ -496,10 +496,22 @@ class MemoryMonitor:
 
     @staticmethod
     def get_rss_memory(include_child_processes=True):
-        this_process = psutilProcess()
-        bytes_used = this_process.memory_info().rss
+        try:
+            this_process = psutilProcess()
+            bytes_used = this_process.memory_info().rss
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, OSError):
+            return 0
         if include_child_processes:
-            return sum((proc.memory_info().rss for proc in this_process.children(recursive=True)), start=bytes_used)
+            try:
+                child_processes = this_process.children(recursive=True)
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, OSError):
+                return bytes_used
+            for proc in child_processes:
+                try:
+                    bytes_used += proc.memory_info().rss
+                except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, OSError):
+                    continue
+            return bytes_used
         return bytes_used
 
     def _monitor_memory(self):
